@@ -21,8 +21,7 @@ party Rust dependencies.
 
 ## Install
 
-This repository is currently private. Clone it with your authenticated GitHub
-account first:
+Clone the public repository:
 
 ```sh
 git clone https://github.com/JEEBIS27/fish-eza-path-colors.git
