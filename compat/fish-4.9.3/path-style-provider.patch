@@ -1,0 +1,105 @@
+--- a/src/highlight/mod.rs
++++ b/src/highlight/mod.rs
+@@ -1,3 +1,4 @@
++mod path_style_provider;
+ mod file_tester;
+ #[allow(clippy::module_inception)]
+ mod highlight;
+--- a/src/highlight/file_tester.rs
++++ b/src/highlight/file_tester.rs
+@@ -63,6 +63,24 @@
+         }
+     }
+ 
++    /// Resolve exactly one existing path, without executing substitutions or globbing.
++    pub fn path_style_provider(&mut self, token: &wstr, for_cd: bool) -> Option<super::path_style_provider::PathStyle> {
++        if self.ctx.vars().get_unless_empty(L!("fish_color_path_style_provider")).is_none()
++            || token.len() > PATH_MAX as usize || self.ctx.check_cancel() {
++            return None;
++        }
++        let mut path = token.to_owned();
++        if !expand_one(&mut path, ExpandFlags::NO_IO, self.ctx, None) { return None; }
++        let expanded = path;
++        let mut path = path_apply_working_directory(&expanded, self.working_directory);
++        // Keep the final symlink (including link-to-directory) instead of following '/'.
++        while path.len() > 1 && path.char_at(path.len() - 1) == '/' { path.pop(); }
++        if for_cd && crate::wutil::lwstat(&path).is_err() {
++            path = crate::path::path_get_cdpath(&expanded, self.working_directory, self.ctx.vars())?;
++        }
++        super::path_style_provider::style_for(&path, self.ctx.vars())
++    }
++
+     /// Test whether a file exists and is readable.
+     /// The input string 'token' is given as an escaped string (as the user may type in).
+     /// If 'prefix' is true, instead check if the path is a prefix of a valid path.
+--- a/src/highlight/highlight.rs
++++ b/src/highlight/highlight.rs
+@@ -198,6 +198,19 @@
+                     face.underline_color = underline_color;
+                 }
+                 face.style = face.style.union_prefer_right(valid_path_face.style);
++            }
++        }
++
++        if let Some(style) = highlight.path_style_provider {
++            if matches!(highlight.foreground, HighlightRole::Param | HighlightRole::Quote | HighlightRole::Redirection) {
++                let background = face.bg;
++                let reverse = face.style.reverse;
++                style.apply(&mut face);
++                // A history-search highlight takes precedence over a filename's style.
++                if highlight.background != HighlightRole::Normal {
++                    face.bg = background;
++                    if reverse == ResettableStyle::On(()) { face.style.reverse = reverse; }
++                }
+             }
+         }
+ 
+@@ -963,6 +976,16 @@
+             }
+             Err(..) => self.color_node(arg, HighlightSpec::with_fg(HighlightRole::Error)),
+         }
++        if let Some(style) = self.file_tester.path_style_provider(&token, cmd_is_cd) {
++            for i in source_range.as_usize() {
++                let spec = &mut self.color_array[i];
++                // Keep operators, variables, escapes, quote delimiters and errors intact.
++                if spec.foreground == HighlightRole::Param
++                    || (spec.foreground == HighlightRole::Quote && !matches!(self.buff.char_at(i), '\'' | '"')) {
++                    spec.path_style_provider = Some(style);
++                }
++            }
++        }
+     }
+ 
+     fn visit_redirection(&mut self, redir: &Redirection) {
+@@ -1013,8 +1036,10 @@
+         };
+         self.color_node(&redir.target, HighlightSpec::with_fg(role));
+         if file_exists {
++            let style = self.file_tester.path_style_provider(&target, false);
+             for i in redir.target.source_range().as_usize() {
+                 self.color_array[i].valid_path = true;
++                self.color_array[i].path_style_provider = style;
+             }
+         }
+     }
+@@ -1324,6 +1349,7 @@
+     pub background: HighlightRole,
+     pub valid_path: bool,
+     pub force_underline: bool,
++    pub path_style_provider: Option<super::path_style_provider::PathStyle>,
+ }
+ 
+ #[cfg(test)]
+--- a/src/env/environment.rs
++++ b/src/env/environment.rs
+@@ -685,6 +685,10 @@
+         "0".into(),
+     );
+ 
++    // Optional path-style hook capability; never inherit it into an unpatched child fish.
++    vars.set_one(L!("fish_path_style_provider_protocol"),
++        EnvSetMode::new_at_early_startup(EnvMode { export: Some(false), ..EnvMode::GLOBAL }), "1".into());
++
+     // Set up the version variable.
+     let version = str2wcstring(crate::BUILD_VERSION);
+     vars.set_one(L!("version"), global_mode, version.clone());
